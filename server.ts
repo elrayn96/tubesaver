@@ -163,6 +163,127 @@ function parseISO8601Duration(isoStr: string): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+// Convert seconds to MM:SS or HH:MM:SS string
+function formatSeconds(secsStr: string): string {
+  const secs = parseInt(secsStr, 10);
+  if (isNaN(secs) || secs <= 0) return "03:45";
+  const hours = Math.floor(secs / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const seconds = secs % 60;
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+// 5-layered fallback strategy to solve incorrect durations under any YouTube markup structure
+function extractDurationFromHtml(html: string, videoDetails?: any): string {
+  // 1. Try from parsed videoDetails or player response structure if available
+  if (videoDetails && videoDetails.lengthSeconds) {
+    const secs = parseInt(videoDetails.lengthSeconds, 10);
+    if (!isNaN(secs) && secs > 0) {
+       return formatSeconds(videoDetails.lengthSeconds);
+    }
+  }
+
+  // 2. Try raw lengthSeconds configurations in HTML (handles escapes/scripts)
+  const lengthSecondsMatch = html.match(/"lengthSeconds"\s*:\s*"(\d+)"/i) || 
+                             html.match(/lengthSeconds\\"\s*:\s*\\"(\d+)\\"/i) ||
+                             html.match(/&quot;lengthSeconds&quot;\s*:\s*&quot;(\d+)&quot;/i) ||
+                             html.match(/\\?"lengthSeconds\\?"\s*:\s*\\?"(\d+)\\?"/i);
+  if (lengthSecondsMatch) {
+    return formatSeconds(lengthSecondsMatch[1]);
+  }
+
+  // 3. Try to parse ISO 8601 itemprop duration meta format
+  const itempropMatch = html.match(/<meta\s+itemprop="duration"\s+content="([^"]+)"/i) ||
+                        html.match(/itemprop="duration"\s+content="([^"]+)"/i);
+  if (itempropMatch) {
+    const parsed = parseISO8601Duration(itempropMatch[1]);
+    if (parsed && parsed !== "03:45") {
+      return parsed;
+    }
+  }
+
+  // 4. Try from alternate open-graph name duration tags
+  const ogVidDurationMatch = html.match(/<meta\s+property="og:video:duration"\s+content="(\d+)"/i) ||
+                             html.match(/property="video:duration"\s+content="(\d+)"/i) ||
+                             html.match(/<meta\s+name="duration"\s+content="(\d+)"/i);
+  if (ogVidDurationMatch) {
+    return formatSeconds(ogVidDurationMatch[1]);
+  }
+
+  // 5. Try approxDurationMs in scripts
+  const approxDurationMatch = html.match(/"approxDurationMs"\s*:\s*"(\d+)"/i) || 
+                              html.match(/approxDurationMs\\"\s*:\s*\\"(\d+)\\"/i) ||
+                              html.match(/&quot;approxDurationMs&quot;\s*:\s*&quot;(\d+)&quot;/i) ||
+                              html.match(/\\?"approxDurationMs\\?"\s*:\s*\\?"(\d+)\\?"/i);
+  if (approxDurationMatch) {
+    const ms = parseInt(approxDurationMatch[1], 10);
+    const secs = Math.floor(ms / 1000);
+    if (secs > 0) {
+      return formatSeconds(String(secs));
+    }
+  }
+
+  return "03:45";
+}
+
+// Exception-safe, robust HTML JSON tree extractor with brace balancing
+function extractJsonFromHtml(html: string, varName: string): any {
+  const marker1 = `${varName} =`;
+  const marker2 = `${varName}=`;
+  let index = html.indexOf(marker1);
+  if (index === -1) {
+    index = html.indexOf(marker2);
+  }
+  if (index === -1) return null;
+  
+  // Find the opening brace of the JSON object
+  const startBraceIdx = html.indexOf("{", index);
+  if (startBraceIdx === -1) return null;
+  
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  
+  for (let i = startBraceIdx; i < html.length; i++) {
+    const char = html[i];
+    
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === "{") {
+        depth++;
+      } else if (char === "}") {
+        depth--;
+        if (depth === 0) {
+          const parsedStr = html.substring(startBraceIdx, i + 1);
+          try {
+            return JSON.parse(parsedStr);
+          } catch (e) {
+            return null;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // Helper function to extract YouTube direct stream details
 async function getYouTubeStreams(videoId: string) {
   try {
@@ -174,64 +295,60 @@ async function getYouTubeStreams(videoId: string) {
     });
     const html = await response.text();
     
-    const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.*?});/s) || html.match(/ytInitialPlayerResponse\s*=\s*({.*?})<\/script>/s);
-    if (!playerResponseMatch) {
-      // Build robust fallback metadata directly from HTML elements
-      let title = "YouTube Video";
-      let duration = "03:45";
-      let viewCount = "1.5M views";
-      let author = "YouTube Creator";
+    // Extract metadata first as fallback references
+    let title = "YouTube Video";
+    let duration = "03:45";
+    let viewCount = "1.5M views";
+    let author = "YouTube Creator";
 
-      // Grab from oembed as reference
-      const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`).then(r => r.json()).catch(() => null);
-      if (oembedRes) {
-        title = oembedRes.title || title;
-        author = oembedRes.author_name || author;
+    // Grab from oembed as reference
+    const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`).then(r => r.json()).catch(() => null);
+    if (oembedRes) {
+      title = oembedRes.title || title;
+      author = oembedRes.author_name || author;
+    }
+
+    // Try to parse exact title from metadata tags
+    const titleMeta = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) || 
+                      html.match(/<meta\s+name="title"\s+content="([^"]+)"/i) || 
+                      html.match(/<title>([^<]+)<\/title>/i);
+    if (titleMeta) {
+      title = titleMeta[1]
+        .replace(/&amp;/g, "&")
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .trim();
+      if (title.endsWith(" - YouTube")) {
+        title = title.substring(0, title.length - 10);
       }
+    }
 
-      // Try to parse exact title from metadata tags
-      const titleMeta = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) || 
-                        html.match(/<meta\s+name="title"\s+content="([^"]+)"/i) || 
-                        html.match(/<title>([^<]+)<\/title>/i);
-      if (titleMeta) {
-        title = titleMeta[1]
-          .replace(/&amp;/g, "&")
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"')
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .trim();
-        if (title.endsWith(" - YouTube")) {
-          title = title.substring(0, title.length - 10);
-        }
-      }
+    // Try to parse exact interaction count
+    const viewsMeta = html.match(/<meta\s+itemprop="interactionCount"\s+content="(\d+)"/i) || 
+                      html.match(/itemprop="interactionCount"\s+content="(\d+)"/i);
+    if (viewsMeta) {
+      const viewsCount = parseInt(viewsMeta[1], 10);
+      viewCount = `${viewsCount.toLocaleString()} views`;
+    }
 
-      // Try to parse exact ISO duration from metadata
-      const durationMeta = html.match(/<meta\s+itemprop="duration"\s+content="([^"]+)"/i) || 
-                           html.match(/itemprop="duration"\s+content="([^"]+)"/i);
-      if (durationMeta) {
-        duration = parseISO8601Duration(durationMeta[1]);
-      }
+    // Try to parse exact author
+    const authorMeta = html.match(/<link\s+itemprop="name"\s+content="([^"]+)"/i) || 
+                       html.match(/<meta\s+itemprop="author"\s+content="([^"]+)"/i);
+    if (authorMeta) {
+      author = authorMeta[1]
+        .replace(/&amp;/g, "&")
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .trim();
+    }
 
-      // Try to parse exact interaction count
-      const viewsMeta = html.match(/<meta\s+itemprop="interactionCount"\s+content="(\d+)"/i) || 
-                        html.match(/itemprop="interactionCount"\s+content="(\d+)"/i);
-      if (viewsMeta) {
-        const viewsCount = parseInt(viewsMeta[1], 10);
-        viewCount = `${viewsCount.toLocaleString()} views`;
-      }
+    // Solve "Duracao incorrecta" using our 5-layered fallback strategy
+    duration = extractDurationFromHtml(html);
 
-      // Try to parse exact author
-      const authorMeta = html.match(/<link\s+itemprop="name"\s+content="([^"]+)"/i) || 
-                         html.match(/<meta\s+itemprop="author"\s+content="([^"]+)"/i);
-      if (authorMeta) {
-        author = authorMeta[1]
-          .replace(/&amp;/g, "&")
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"')
-          .trim();
-      }
-
+    const playerObj = extractJsonFromHtml(html, "ytInitialPlayerResponse");
+    if (!playerObj) {
       return {
         title,
         duration,
@@ -241,61 +358,70 @@ async function getYouTubeStreams(videoId: string) {
       };
     }
     
-    const playerObj = JSON.parse(playerResponseMatch[1]);
-    const videoDetails = playerObj.videoDetails || {};
-    const streamingData = playerObj.streamingData;
-    
-    const formatsList = [
-      ...(streamingData?.formats || []),
-      ...(streamingData?.adaptiveFormats || [])
-    ];
-    
-    const streams = formatsList.map((f: any) => {
-      let directUrl = f.url;
-      if (!directUrl && f.signatureCipher) {
-        const params = new URLSearchParams(f.signatureCipher);
-        const baseUrl = params.get("url");
-        const s = params.get("s");
-        const sp = params.get("sp") || "sig";
-        if (baseUrl) {
-          directUrl = s ? `${baseUrl}&${sp}=${s}` : baseUrl;
-        }
-      } else if (!directUrl && f.cipher) {
-        const params = new URLSearchParams(f.cipher);
-        const baseUrl = params.get("url");
-        const s = params.get("s");
-        const sp = params.get("sp") || "sig";
-        if (baseUrl) {
-          directUrl = s ? `${baseUrl}&${sp}=${s}` : baseUrl;
-        }
-      }
+    try {
+      const videoDetails = playerObj.videoDetails || {};
+      const streamingData = playerObj.streamingData;
       
-      return {
-        itag: f.itag,
-        url: directUrl,
-        mimeType: f.mimeType || "",
-        quality: f.qualityLabel || (f.audioQuality ? "audio" : "unknown"),
-        width: f.width,
-        height: f.height,
-        fps: f.fps,
-        contentLength: f.contentLength
-      };
-    }).filter(s => !!s.url);
-    
-    // Format duration secs to string
-    const secs = parseInt(videoDetails.lengthSeconds || "225", 10);
-    const durationStr = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, "0")}`;
-    
-    const views = parseInt(videoDetails.viewCount || "1420582", 10);
-    const viewCountStr = `${views.toLocaleString()} views`;
+      const formatsList = [
+        ...(streamingData?.formats || []),
+        ...(streamingData?.adaptiveFormats || [])
+      ];
+      
+      const streams = formatsList.map((f: any) => {
+        let directUrl = f.url;
+        if (!directUrl && f.signatureCipher) {
+          const params = new URLSearchParams(f.signatureCipher);
+          const baseUrl = params.get("url");
+          const s = params.get("s");
+          const sp = params.get("sp") || "sig";
+          if (baseUrl) {
+            directUrl = s ? `${baseUrl}&${sp}=${s}` : baseUrl;
+          }
+        } else if (!directUrl && f.cipher) {
+          const params = new URLSearchParams(f.cipher);
+          const baseUrl = params.get("url");
+          const s = params.get("s");
+          const sp = params.get("sp") || "sig";
+          if (baseUrl) {
+            directUrl = s ? `${baseUrl}&${sp}=${s}` : baseUrl;
+          }
+        }
+        
+        return {
+          itag: f.itag,
+          url: directUrl,
+          mimeType: f.mimeType || "",
+          quality: f.qualityLabel || (f.audioQuality ? "audio" : "unknown"),
+          width: f.width,
+          height: f.height,
+          fps: f.fps,
+          contentLength: f.contentLength
+        };
+      }).filter(s => !!s.url);
+      
+      // Compute final duration using videoDetails or fallbacks
+      const finalDuration = extractDurationFromHtml(html, videoDetails);
+      
+      const views = parseInt(videoDetails.viewCount || "1420582", 10);
+      const viewCountStr = `${views.toLocaleString()} views`;
 
-    return {
-      title: videoDetails.title || "YouTube Video",
-      duration: durationStr,
-      viewCount: viewCountStr,
-      author: videoDetails.author || "YouTube Creator",
-      streams
-    };
+      return {
+        title: videoDetails.title || title,
+        duration: finalDuration,
+        viewCount: viewCountStr,
+        author: videoDetails.author || author,
+        streams
+      };
+    } catch (innerErr) {
+      console.warn("[TubeSaver JSON Parse Fallback]:", innerErr);
+      return {
+        title,
+        duration,
+        viewCount,
+        author,
+        streams: []
+      };
+    }
   } catch (err) {
     console.error("[TubeSaver Core Stream Sniffer] Error:", err);
     return null;
@@ -329,10 +455,9 @@ app.post("/api/analyze-url", async (req, res) => {
       let playlistVideos: any[] = [];
       let playlistTitle = "YouTube Playlist";
       
-      const initialDataMatch = html.match(/ytInitialData\s*=\s*({.*?});/s) || html.match(/ytInitialData\s*=\s*({.*?})<\/script>/s);
-      if (initialDataMatch) {
+      const dataObj = extractJsonFromHtml(html, "ytInitialData");
+      if (dataObj) {
         try {
-          const dataObj = JSON.parse(initialDataMatch[1]);
           
           // Get playlist title from metadata block
           playlistTitle = dataObj.metadata?.playlistMetadataRenderer?.title || playlistTitle;
@@ -447,14 +572,14 @@ app.get("/api/tasks", (req, res) => {
 
 // 3. POST /api/download
 app.post("/api/download", (req, res) => {
-  const { videoId, title, thumbnail, duration, formatId, filename } = req.body;
+  const { videoId, title, thumbnail, duration, formatId, filename, taskId: clientTaskId } = req.body;
 
   if (!videoId || !title) {
     return res.status(400).json({ status: "error", message: "Missing required download parameters." });
   }
 
   const selectedFormat = DEFAULT_FORMATS.find(f => f.id === formatId) || DEFAULT_FORMATS[0];
-  const taskId = `${videoId}_${Date.now()}`;
+  const taskId = clientTaskId || `${videoId}_${Date.now()}`;
   
   const newTask: DownloadTask = {
     id: taskId,
@@ -506,6 +631,11 @@ app.post("/api/download", (req, res) => {
       task.speed = "Finished";
       task.eta = "Ready to save";
       clearInterval(downloadInterval);
+      
+      // Auto-cleanup completed task from backend active memory after 15 seconds to prevent re-polling ghosts
+      setTimeout(() => {
+        activeTasks.delete(taskId);
+      }, 15000);
     }
 
     activeTasks.set(taskId, task);

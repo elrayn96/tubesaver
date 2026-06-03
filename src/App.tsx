@@ -23,6 +23,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const completedTaskIds = useRef<Set<string>>(new Set());
 
   // 1. Initial Load: Retrieve History log from localStorage & query server formats catalog
   useEffect(() => {
@@ -65,6 +66,10 @@ export default function App() {
           } else if (data.type === "TASK_UPDATE") {
             const updatedTask: DownloadTask = data.task;
             
+            if (completedTaskIds.current.has(updatedTask.id)) {
+              return;
+            }
+            
             setTasks((prev) => {
               const exists = prev.some(t => t.id === updatedTask.id);
               if (exists) {
@@ -76,6 +81,7 @@ export default function App() {
 
             // Automatically promote finished downloads to LocalStorage history
             if (updatedTask.status === "completed") {
+              completedTaskIds.current.add(updatedTask.id);
               setHistory((currentHistory) => {
                 // Prevent duplicate records for the same operation
                 const idExists = currentHistory.some(item => item.id === updatedTask.id);
@@ -133,18 +139,22 @@ export default function App() {
         if (!res.ok) return;
         const data = await res.json();
         if (data.status === "success" && data.tasks) {
-          const remoteTasks: DownloadTask[] = data.tasks;
+          const remoteTasksAll: DownloadTask[] = data.tasks;
+          const remoteTasks = remoteTasksAll.filter(t => !completedTaskIds.current.has(t.id));
           
           setTasks((currentTasks) => {
-            // Keep completed tasks that might be fading out naturally
+            // Keep completed tasks that might be fading out naturally, but discard missing active tasks
             const updated = currentTasks.map(local => {
               const remote = remoteTasks.find(r => r.id === local.id);
               if (remote) {
-                // Keep completed local state intact or update if progress is lower
                 return remote;
               }
-              return local;
-            });
+              // If it's completed, keep it so it fades out naturally (slide out timeout completes in 4s)
+              if (local.status === "completed") {
+                return local;
+              }
+              return null; // flag active-but-missing-from-server tasks for cleanup (e.g. canceled)
+            }).filter((t): t is DownloadTask => t !== null);
 
             // Insert new tasks
             remoteTasks.forEach(remote => {
@@ -159,6 +169,7 @@ export default function App() {
           // Move any completed ones to history
           remoteTasks.forEach((remoteTask) => {
             if (remoteTask.status === "completed") {
+              completedTaskIds.current.add(remoteTask.id);
               setHistory((currentHistory) => {
                 const idExists = currentHistory.some(item => item.id === remoteTask.id);
                 if (idExists) return currentHistory;
@@ -258,6 +269,7 @@ export default function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        taskId: tempTaskId,
         videoId: videoData.videoId,
         title: videoData.title,
         thumbnail: videoData.thumbnail,
@@ -316,6 +328,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          taskId: tempTasks[index].id,
           videoId: v.videoId,
           title: v.title,
           thumbnail: v.thumbnail,
@@ -469,7 +482,10 @@ export default function App() {
             {/* active live WebSockets task progress lists */}
             <DownloadProgressList
               tasks={tasks}
-              onCancel={(id) => setTasks((prev) => prev.filter(t => t.id !== id))}
+              onCancel={(id) => {
+                completedTaskIds.current.add(id);
+                setTasks((prev) => prev.filter(t => t.id !== id));
+              }}
             />
 
             {/* single video config results display */}
