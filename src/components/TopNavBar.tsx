@@ -40,7 +40,7 @@ export default function TopNavBar({ currentTab, setTab, historyCount }: TopNavBa
 
           <button
             onClick={() => setTab("history")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-sans text-sm font-semibold transition-all relative ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-sans text-sm font-semibold transition-all ${
               currentTab === "history"
                 ? "bg-red-50 text-red-600 shadow-xs"
                 : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
@@ -48,11 +48,6 @@ export default function TopNavBar({ currentTab, setTab, historyCount }: TopNavBa
           >
             <History className="w-4 h-4" />
             <span>History</span>
-            {historyCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1.5 flex items-center justify-center bg-red-600 text-white font-sans font-bold text-[10px] rounded-full ring-2 ring-white animate-pulse">
-                {historyCount}
-              </span>
-            )}
           </button>
         </div>
 
