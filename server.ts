@@ -244,7 +244,11 @@ app.post("/api/analyze-url", async (req, res) => {
     return res.status(400).json({ status: "error", message: "Please provide a valid YouTube URL." });
   }
 
-  const isPlaylist = url.toLowerCase().includes("list=") || url.toLowerCase().includes("playlist");
+  const videoId = extractVideoId(url);
+  const belongsToVideo = videoId !== "dQw4w9WgXcQ" || url.includes("dQw4w9WgXcQ");
+  
+  // A URL is treated as a playlist ONLY if it has playlist characteristics and does NOT contain a valid video ID
+  const isPlaylist = (url.toLowerCase().includes("list=") || url.toLowerCase().includes("playlist")) && !belongsToVideo;
   
   if (isPlaylist) {
     try {
@@ -328,7 +332,6 @@ app.post("/api/analyze-url", async (req, res) => {
     }
   } else {
     // Single Video analysis
-    const videoId = extractVideoId(url);
     if (!videoId) {
       return res.status(400).json({ status: "error", message: "Could not extract a valid YouTube video ID from the provided URL." });
     }
@@ -336,7 +339,7 @@ app.post("/api/analyze-url", async (req, res) => {
     try {
       const ytData = await getYouTubeStreams(videoId);
       if (!ytData) {
-        return res.status(100).json({
+        return res.status(200).json({
           status: "success",
           type: "video",
           video: {
