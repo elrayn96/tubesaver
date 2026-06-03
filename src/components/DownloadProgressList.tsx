@@ -1,6 +1,6 @@
 import React from "react";
 import { DownloadTask } from "../types";
-import { X, RefreshCw, CheckCircle, Clock, Volume2, ShieldAlert } from "lucide-react";
+import { X, RefreshCw, CheckCircle, Clock, Volume2, ShieldAlert, Download } from "lucide-react";
 
 interface DownloadProgressListProps {
   tasks: DownloadTask[];
@@ -140,6 +140,19 @@ export default function DownloadProgressList({ tasks, onCancel }: DownloadProgre
                         <span>{task.eta}</span>
                       </span>
                     </div>
+                  </div>
+                )}
+
+                {isCompleted && (
+                  <div className="mt-4 pt-3 border-t border-gray-200/30">
+                    <a
+                      href={`/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`}
+                      download
+                      className="w-full text-center inline-flex justify-center items-center gap-2 font-sans text-xs font-bold uppercase tracking-wider text-white bg-emerald-600 hover:bg-emerald-700 py-3 px-4 rounded-xl shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 active:scale-[0.98] transition-all cursor-pointer font-medium"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Baixar para o Dispositivo</span>
+                    </a>
                   </div>
                 )}
               </div>

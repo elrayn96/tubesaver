@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { HistoryItem } from "../types";
-import { Trash2, Search, Video, Music, Sparkles, RefreshCw, Layers } from "lucide-react";
+import { Trash2, Search, Video, Music, Sparkles, RefreshCw, Layers, Download } from "lucide-react";
 
 interface HistoryPageProps {
   history: HistoryItem[];
@@ -176,6 +176,14 @@ export default function HistoryPage({ history, onDelete, onClearAll, onReDownloa
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right">
                           <div className="flex justify-end gap-1.5">
+                            <a
+                              href={`/api/download-file?videoId=${item.videoId}&format=${item.type === "video" ? "mp4" : "mp3"}&title=${encodeURIComponent(item.title)}`}
+                              download
+                              title="Download to Device (Salvar no Dispositivo)"
+                              className="p-2 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 transition-all focus:outline-none"
+                            >
+                              <Download className="w-4.5 h-4.5" />
+                            </a>
                             <button
                               onClick={() => onReDownload(item.videoId)}
                               title="Re-download this media URL"
