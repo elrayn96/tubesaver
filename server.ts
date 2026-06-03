@@ -149,6 +149,20 @@ app.get("/api/formats", (req, res) => {
   res.json({ status: "success", formats: DEFAULT_FORMATS });
 });
 
+// ISO 8601 YouTube duration parser (e.g., PT1H30M15S, PT4M11S, PT42S)
+function parseISO8601Duration(isoStr: string): string {
+  const match = isoStr.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i);
+  if (!match) return "03:45";
+  const hours = parseInt(match[1] || "0", 10);
+  const minutes = parseInt(match[2] || "0", 10);
+  const seconds = parseInt(match[3] || "0", 10);
+  
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 // Helper function to extract YouTube direct stream details
 async function getYouTubeStreams(videoId: string) {
   try {
@@ -162,18 +176,69 @@ async function getYouTubeStreams(videoId: string) {
     
     const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.*?});/s) || html.match(/ytInitialPlayerResponse\s*=\s*({.*?})<\/script>/s);
     if (!playerResponseMatch) {
-      // Fetch oembed as secondary fallback
+      // Build robust fallback metadata directly from HTML elements
+      let title = "YouTube Video";
+      let duration = "03:45";
+      let viewCount = "1.5M views";
+      let author = "YouTube Creator";
+
+      // Grab from oembed as reference
       const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`).then(r => r.json()).catch(() => null);
       if (oembedRes) {
-        return {
-          title: oembedRes.title || "YouTube Video",
-          duration: "03:45",
-          viewCount: "1.5M views",
-          author: oembedRes.author_name || "YouTube Creator",
-          streams: []
-        };
+        title = oembedRes.title || title;
+        author = oembedRes.author_name || author;
       }
-      return null;
+
+      // Try to parse exact title from metadata tags
+      const titleMeta = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) || 
+                        html.match(/<meta\s+name="title"\s+content="([^"]+)"/i) || 
+                        html.match(/<title>([^<]+)<\/title>/i);
+      if (titleMeta) {
+        title = titleMeta[1]
+          .replace(/&amp;/g, "&")
+          .replace(/&#39;/g, "'")
+          .replace(/&quot;/g, '"')
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .trim();
+        if (title.endsWith(" - YouTube")) {
+          title = title.substring(0, title.length - 10);
+        }
+      }
+
+      // Try to parse exact ISO duration from metadata
+      const durationMeta = html.match(/<meta\s+itemprop="duration"\s+content="([^"]+)"/i) || 
+                           html.match(/itemprop="duration"\s+content="([^"]+)"/i);
+      if (durationMeta) {
+        duration = parseISO8601Duration(durationMeta[1]);
+      }
+
+      // Try to parse exact interaction count
+      const viewsMeta = html.match(/<meta\s+itemprop="interactionCount"\s+content="(\d+)"/i) || 
+                        html.match(/itemprop="interactionCount"\s+content="(\d+)"/i);
+      if (viewsMeta) {
+        const viewsCount = parseInt(viewsMeta[1], 10);
+        viewCount = `${viewsCount.toLocaleString()} views`;
+      }
+
+      // Try to parse exact author
+      const authorMeta = html.match(/<link\s+itemprop="name"\s+content="([^"]+)"/i) || 
+                         html.match(/<meta\s+itemprop="author"\s+content="([^"]+)"/i);
+      if (authorMeta) {
+        author = authorMeta[1]
+          .replace(/&amp;/g, "&")
+          .replace(/&#39;/g, "'")
+          .replace(/&quot;/g, '"')
+          .trim();
+      }
+
+      return {
+        title,
+        duration,
+        viewCount,
+        author,
+        streams: []
+      };
     }
     
     const playerObj = JSON.parse(playerResponseMatch[1]);
@@ -373,6 +438,11 @@ app.post("/api/analyze-url", async (req, res) => {
       return res.status(500).json({ status: "error", message: "Error contacting video services: " + err.message });
     }
   }
+});
+
+// 2.5 GET /api/tasks - Fallback polling endpoint for active download progress
+app.get("/api/tasks", (req, res) => {
+  res.json({ status: "success", tasks: Array.from(activeTasks.values()) });
 });
 
 // 3. POST /api/download

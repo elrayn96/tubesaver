@@ -125,6 +125,78 @@ export default function App() {
     };
   }, [formats]);
 
+  // 2.5 Fallback HTTP Polling (highly robust and guarantees state sync inside iframe sandboxes)
+  useEffect(() => {
+    const pollTasks = async () => {
+      try {
+        const res = await fetch("/api/tasks");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.status === "success" && data.tasks) {
+          const remoteTasks: DownloadTask[] = data.tasks;
+          
+          setTasks((currentTasks) => {
+            // Keep completed tasks that might be fading out naturally
+            const updated = currentTasks.map(local => {
+              const remote = remoteTasks.find(r => r.id === local.id);
+              if (remote) {
+                // Keep completed local state intact or update if progress is lower
+                return remote;
+              }
+              return local;
+            });
+
+            // Insert new tasks
+            remoteTasks.forEach(remote => {
+              if (!updated.some(u => u.id === remote.id)) {
+                updated.push(remote);
+              }
+            });
+
+            return updated;
+          });
+
+          // Move any completed ones to history
+          remoteTasks.forEach((remoteTask) => {
+            if (remoteTask.status === "completed") {
+              setHistory((currentHistory) => {
+                const idExists = currentHistory.some(item => item.id === remoteTask.id);
+                if (idExists) return currentHistory;
+
+                const sizeOfFormat = formats.find(f => f.resolution === remoteTask.quality)?.size || "15.4 MB";
+                const freshItem: HistoryItem = {
+                  id: remoteTask.id,
+                  title: remoteTask.title,
+                  videoId: remoteTask.videoId,
+                  thumbnail: remoteTask.thumbnail,
+                  duration: remoteTask.duration,
+                  format: remoteTask.quality,
+                  type: remoteTask.format === "mp3" ? "audio" : "video",
+                  date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }),
+                  size: sizeOfFormat
+                };
+
+                const newHistory = [freshItem, ...currentHistory];
+                localStorage.setItem("tubesaver_history", JSON.stringify(newHistory));
+                return newHistory;
+              });
+
+              // Slide completed tasks out of active list
+              setTimeout(() => {
+                setTasks((prev) => prev.filter(t => t.id !== remoteTask.id));
+              }, 4000);
+            }
+          });
+        }
+      } catch (err) {
+        console.error("Task fallback polling failed silently:", err);
+      }
+    };
+
+    const intervalId = setInterval(pollTasks, 2000);
+    return () => clearInterval(intervalId);
+  }, [formats]);
+
   // 3. Post URL validation & analyze endpoints
   const handleAnalyze = (e: React.FormEvent) => {
     e.preventDefault();
@@ -163,6 +235,25 @@ export default function App() {
   const handleDownload = (formatId: string, filename: string) => {
     if (!videoData) return;
 
+    // Create a local temporary task immediately so the active transfer list is shown with 0% right away
+    const tempTaskId = `${videoData.videoId}_${Date.now()}`;
+    const selectedFormat = formats.find(f => f.id === formatId) || formats[0] || { container: "mp4", resolution: "720p" };
+    const tempTask: DownloadTask = {
+      id: tempTaskId,
+      title: filename || videoData.title,
+      videoId: videoData.videoId,
+      thumbnail: videoData.thumbnail,
+      duration: videoData.duration,
+      format: selectedFormat.container,
+      quality: selectedFormat.resolution,
+      progress: 0,
+      speed: "0.0 MB/s",
+      eta: "Starting...",
+      status: "pending"
+    };
+
+    setTasks(prev => [tempTask, ...prev]);
+
     fetch("/api/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -181,11 +272,18 @@ export default function App() {
           // Clear form to allow new inputs
           setUrl("");
           setVideoData(null);
+          // Substitute with real task
+          if (data.task) {
+            setTasks(prev => prev.map(t => t.id === tempTaskId ? data.task : t));
+          }
         } else {
+          // Remove if failed
+          setTasks(prev => prev.filter(t => t.id !== tempTaskId));
           setError(data.message || "Failed to add download task. Please try again.");
         }
       })
       .catch(err => {
+        setTasks(prev => prev.filter(t => t.id !== tempTaskId));
         setError("Failed to coordinate backend queue processor.");
       });
   };
@@ -194,10 +292,26 @@ export default function App() {
   const handleBatchDownload = (videoIds: string[], formatId: string) => {
     if (!playlistData) return;
 
-    // Consecutively dispatch playlist items
     const selectedVideos = playlistData.videos.filter(v => videoIds.includes(v.id));
-    
-    selectedVideos.forEach((v) => {
+    const selectedFormat = formats.find(f => f.id === formatId) || formats[0] || { container: "mp4", resolution: "720p" };
+
+    const tempTasks: DownloadTask[] = selectedVideos.map((v, idx) => ({
+      id: `batch_${idx}_${Date.now()}`,
+      title: v.title,
+      videoId: v.videoId,
+      thumbnail: v.thumbnail,
+      duration: v.duration,
+      format: selectedFormat.container,
+      quality: selectedFormat.resolution,
+      progress: 0,
+      speed: "0.0 MB/s",
+      eta: "Starting...",
+      status: "pending"
+    }));
+
+    setTasks(prev => [...tempTasks, ...prev]);
+
+    selectedVideos.forEach((v, index) => {
       fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -208,7 +322,19 @@ export default function App() {
           duration: v.duration,
           formatId
         })
-      }).catch(err => console.error("Error setting batch item for: ", v.title));
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status === "success" && data.task) {
+          setTasks(prev => prev.map(t => t.id === tempTasks[index].id ? data.task : t));
+        } else {
+          setTasks(prev => prev.filter(t => t.id !== tempTasks[index].id));
+        }
+      })
+      .catch(err => {
+        setTasks(prev => prev.filter(t => t.id !== tempTasks[index].id));
+        console.error("Error setting batch item for: ", v.title);
+      });
     });
 
     // Clear and reset form

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { DownloadTask } from "../types";
 import { X, RefreshCw, CheckCircle, Clock, Volume2, ShieldAlert, Download } from "lucide-react";
 
@@ -8,6 +8,34 @@ interface DownloadProgressListProps {
 }
 
 export default function DownloadProgressList({ tasks, onCancel }: DownloadProgressListProps) {
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  const triggerDownload = async (task: DownloadTask) => {
+    if (downloadingId) return;
+    setDownloadingId(task.id);
+    try {
+      const response = await fetch(
+        `/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file stream (status: ${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${task.title.replace(/[^a-zA-Z0-9]/g, "_")}.${task.format === "mp3" || task.format === "audio" ? "mp3" : "mp4"}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Local file fetch download failure:", err);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   if (tasks.length === 0) return null;
 
   return (
@@ -145,14 +173,23 @@ export default function DownloadProgressList({ tasks, onCancel }: DownloadProgre
 
                 {isCompleted && (
                   <div className="mt-4 pt-3 border-t border-gray-200/30">
-                    <a
-                      href={`/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`}
-                      download
-                      className="w-full text-center inline-flex justify-center items-center gap-2 font-sans text-xs font-bold uppercase tracking-wider text-white bg-emerald-600 hover:bg-emerald-700 py-3 px-4 rounded-xl shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 active:scale-[0.98] transition-all cursor-pointer font-medium"
+                    <button
+                      onClick={() => triggerDownload(task)}
+                      disabled={downloadingId === task.id}
+                      className="w-full text-center inline-flex justify-center items-center gap-2 font-sans text-xs font-bold uppercase tracking-wider text-white bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 py-3 px-4 rounded-xl shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 active:scale-[0.98] transition-all cursor-pointer font-medium disabled:cursor-not-allowed"
                     >
-                      <Download className="w-4 h-4" />
-                      <span>Baixar para o Dispositivo</span>
-                    </a>
+                      {downloadingId === task.id ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>A descarregar para o seu dispositivo...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-4 h-4" />
+                          <span>Baixar para o Dispositivo</span>
+                        </>
+                      )}
+                    </button>
                   </div>
                 )}
               </div>

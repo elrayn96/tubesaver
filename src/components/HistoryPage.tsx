@@ -12,6 +12,34 @@ interface HistoryPageProps {
 export default function HistoryPage({ history, onDelete, onClearAll, onReDownload }: HistoryPageProps) {
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState<"all" | "video" | "audio">("all");
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  const triggerDownload = async (item: HistoryItem) => {
+    if (downloadingId) return;
+    setDownloadingId(item.id);
+    const format = item.type === "video" ? "mp4" : "mp3";
+    try {
+      const response = await fetch(
+        `/api/download-file?videoId=${item.videoId}&format=${format}&title=${encodeURIComponent(item.title)}`
+      );
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file stream (status: ${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${item.title.replace(/[^a-zA-Z0-9]/g, "_")}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Local file fetch download failure from History:", err);
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   const filtered = history.filter((item) => {
     const matchesSearch = item.title.toLowerCase().includes(search.toLowerCase());
@@ -176,14 +204,18 @@ export default function HistoryPage({ history, onDelete, onClearAll, onReDownloa
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right">
                           <div className="flex justify-end gap-1.5">
-                            <a
-                              href={`/api/download-file?videoId=${item.videoId}&format=${item.type === "video" ? "mp4" : "mp3"}&title=${encodeURIComponent(item.title)}`}
-                              download
-                              title="Download to Device (Salvar no Dispositivo)"
-                              className="p-2 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 transition-all focus:outline-none"
+                            <button
+                              onClick={() => triggerDownload(item)}
+                              disabled={downloadingId === item.id}
+                              title={downloadingId === item.id ? "A descarregar..." : "Download to Device (Salvar no Dispositivo)"}
+                              className="p-2 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 disabled:text-emerald-400 disabled:bg-transparent transition-all focus:outline-none"
                             >
-                              <Download className="w-4.5 h-4.5" />
-                            </a>
+                              {downloadingId === item.id ? (
+                                <RefreshCw className="w-4.5 h-4.5 animate-spin" />
+                              ) : (
+                                <Download className="w-4.5 h-4.5" />
+                              )}
+                            </button>
                             <button
                               onClick={() => onReDownload(item.videoId)}
                               title="Re-download this media URL"

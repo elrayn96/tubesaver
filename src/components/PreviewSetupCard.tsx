@@ -12,11 +12,13 @@ export default function PreviewSetupCard({ video, onDownload, isDownloading }: P
   const [selectedType, setSelectedType] = useState<"mp4" | "mp3">("mp4");
   const [selectedFormatId, setSelectedFormatId] = useState<string>("");
   const [customFilename, setCustomFilename] = useState<string>("");
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
   // Populate state on load
   useEffect(() => {
     if (video) {
       setCustomFilename(video.title);
+      setIsPlaying(false);
       // Automatically choose default format
       const defaultFormat = video.formats.find(f => f.container === selectedType);
       if (defaultFormat) {
@@ -39,20 +41,36 @@ export default function PreviewSetupCard({ video, onDownload, isDownloading }: P
       {/* Left Column: Video Info & Thumbnail */}
       <div className="md:col-span-5 bg-gray-50/50 p-6 sm:p-8 flex flex-col justify-between border-b md:border-b-0 md:border-r border-gray-100">
         <div className="space-y-4">
-          {/* Cover Art layout */}
+          {/* Cover Art layout / Embedded Interactive Player */}
           <div className="relative w-full aspect-video rounded-2xl overflow-hidden shadow-xs border border-gray-100 bg-black group">
-            <img
-              src={video.thumbnail}
-              alt={video.title}
-              className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-500"
-              referrerPolicy="no-referrer"
-            />
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 bg-white/90 group-hover:bg-red-600 group-hover:text-white rounded-full flex items-center justify-center shadow-md transition-all">
-              <Play className="w-5 h-5 fill-current ml-0.5" />
-            </div>
-            <div className="absolute bottom-3 right-3 bg-black/75 rounded-md px-2 py-0.5 font-mono text-[10px] font-bold text-white">
-              {video.duration}
-            </div>
+            {isPlaying ? (
+              <iframe
+                src={`https://www.youtube.com/embed/${video.videoId}?autoplay=1`}
+                title="YouTube Video Preview"
+                frameBorder="0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+                className="w-full h-full absolute inset-0"
+              ></iframe>
+            ) : (
+              <div 
+                onClick={() => setIsPlaying(true)}
+                className="w-full h-full relative cursor-pointer group"
+              >
+                <img
+                  src={video.thumbnail}
+                  alt={video.title}
+                  className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-500"
+                  referrerPolicy="no-referrer"
+                />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 bg-white/95 group-hover:bg-red-600 group-hover:text-white rounded-full flex items-center justify-center shadow-md transition-all">
+                  <Play className="w-5 h-5 fill-current ml-0.5" />
+                </div>
+                <div className="absolute bottom-3 right-3 bg-black/75 rounded-md px-2 py-0.5 font-mono text-[10px] font-bold text-white">
+                  {video.duration}
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
