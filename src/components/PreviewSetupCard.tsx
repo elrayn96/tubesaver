@@ -212,7 +212,7 @@ export default function PreviewSetupCard({ video, onDownload, isDownloading }: P
             }`}
           >
             <Video className="w-4 h-4" />
-            <span>Process Download</span>
+            <span>Preparar Download</span>
           </button>
         </div>
       </form>

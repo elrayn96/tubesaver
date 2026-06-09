@@ -82,6 +82,7 @@ export default function App() {
             // Automatically promote finished downloads to LocalStorage history
             if (updatedTask.status === "completed") {
               completedTaskIds.current.add(updatedTask.id);
+              triggerDeviceDownload(updatedTask);
               setHistory((currentHistory) => {
                 // Prevent duplicate records for the same operation
                 const idExists = currentHistory.some(item => item.id === updatedTask.id);
@@ -170,6 +171,7 @@ export default function App() {
           remoteTasks.forEach((remoteTask) => {
             if (remoteTask.status === "completed") {
               completedTaskIds.current.add(remoteTask.id);
+              triggerDeviceDownload(remoteTask);
               setHistory((currentHistory) => {
                 const idExists = currentHistory.some(item => item.id === remoteTask.id);
                 if (idExists) return currentHistory;
@@ -355,6 +357,17 @@ export default function App() {
     setPlaylistData(null);
   };
 
+  // 5.5 Automatically download prepared file to device
+  const triggerDeviceDownload = (task: DownloadTask) => {
+    const downloadUrl = `/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`;
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = `${task.title.replace(/[^a-zA-Z0-9]/g, "_")}.${task.format === "mp3" || task.format === "audio" ? "mp3" : "mp4"}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   // 6. Delete item from localStorage history
   const handleDeleteHistory = (id: string) => {
     const updated = history.filter(item => item.id !== id);
@@ -486,6 +499,7 @@ export default function App() {
                 completedTaskIds.current.add(id);
                 setTasks((prev) => prev.filter(t => t.id !== id));
               }}
+              onTriggerDownload={triggerDeviceDownload}
             />
 
             {/* single video config results display */}

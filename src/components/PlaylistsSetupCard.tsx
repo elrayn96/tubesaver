@@ -212,7 +212,7 @@ export default function PlaylistsSetupCard({ playlist, formats, onBatchDownload,
             }`}
           >
             <Download className="w-4 h-4" />
-            <span>Download {selectedVideos.length} Videos</span>
+            <span>Preparar {selectedVideos.length} Vídeos</span>
           </button>
         </div>
       </form>

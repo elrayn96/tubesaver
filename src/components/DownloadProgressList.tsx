@@ -5,30 +5,17 @@ import { X, RefreshCw, CheckCircle, Clock, Volume2, ShieldAlert, Download } from
 interface DownloadProgressListProps {
   tasks: DownloadTask[];
   onCancel: (id: string) => void;
+  onTriggerDownload: (task: DownloadTask) => void;
 }
 
-export default function DownloadProgressList({ tasks, onCancel }: DownloadProgressListProps) {
+export default function DownloadProgressList({ tasks, onCancel, onTriggerDownload }: DownloadProgressListProps) {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   const triggerDownload = async (task: DownloadTask) => {
     if (downloadingId) return;
     setDownloadingId(task.id);
     try {
-      const response = await fetch(
-        `/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`
-      );
-      if (!response.ok) {
-        throw new Error(`Failed to fetch file stream (status: ${response.status})`);
-      }
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${task.title.replace(/[^a-zA-Z0-9]/g, "_")}.${task.format === "mp3" || task.format === "audio" ? "mp3" : "mp4"}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      await onTriggerDownload(task);
     } catch (err) {
       console.error("Local file fetch download failure:", err);
     } finally {
@@ -93,13 +80,13 @@ export default function DownloadProgressList({ tasks, onCancel }: DownloadProgre
                     {/* Transfer dynamic status logs */}
                     {isConverting && (
                       <span className="font-sans text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-sm animate-pulse">
-                        Converting Format...
+                        A converter formato no servidor...
                       </span>
                     )}
                     {isCompleted && (
                       <span className="font-sans text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-sm flex items-center gap-1">
                         <CheckCircle className="w-3 h-3" />
-                        <span>Completed</span>
+                        <span>Concluído</span>
                       </span>
                     )}
                   </div>
@@ -122,10 +109,10 @@ export default function DownloadProgressList({ tasks, onCancel }: DownloadProgre
                 <div className="flex justify-between items-end mb-1">
                   <span className="font-sans text-xs font-semibold text-gray-500">
                     {isConverting 
-                      ? "FFmpeg encoding media streams..." 
+                      ? "Processador FFmpeg a codificar fluxos de media no servidor..." 
                       : isCompleted 
-                        ? "Process complete and verified!" 
-                        : "Downloading streaming segments..."
+                        ? "Processo de preparação concluído no servidor!" 
+                        : "A processar/descarregar segmentos no servidor..."
                     }
                   </span>
                   <span className="font-mono text-sm font-extrabold text-gray-900">
@@ -149,19 +136,10 @@ export default function DownloadProgressList({ tasks, onCancel }: DownloadProgre
 
                 {/* Live speed rates panel */}
                 {!isCompleted && !isFailed && (
-                  <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-gray-200/40">
+                  <div className="grid grid-cols-1 gap-4 mt-3 pt-3 border-t border-gray-200/40">
                     <div className="flex flex-col">
                       <span className="font-sans text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                        Transfer Rate
-                      </span>
-                      <span className="font-sans text-xs font-extrabold text-gray-700 mt-0.5">
-                        {task.speed}
-                      </span>
-                    </div>
-
-                    <div className="flex flex-col">
-                      <span className="font-sans text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                        Estimated ETA
+                        Tempo Estimado
                       </span>
                       <span className="font-sans text-xs font-semibold text-gray-700 mt-0.5 flex items-center gap-1">
                         <Clock className="w-3.5 h-3.5 text-gray-400" />
