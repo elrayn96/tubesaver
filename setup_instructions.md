@@ -93,17 +93,3 @@ npm run dev
 ├── docker-compose.yml        # Multi-container local orchestration script
 └── package.json              # NPM script and libraries lists
 ```
-
-
-## 🔍 System Live Scan Diagnostics
-```json
-{
-  "python3 --version": "Error/Not Found: Command failed: python3 --version\nPython was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.\r\n",
-  "python --version": "Python 3.13.13",
-  "pip3 --version": "pip 26.1.2 from C:\\Users\\WORST\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\pip (python 3.13)",
-  "ffmpeg -version": "Error/Not Found: Command failed: ffmpeg -version\n'ffmpeg' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
-  "curl --version": "curl 8.13.0 (Windows) libcurl/8.13.0 Schannel zlib/1.3.1 WinIDN\r",
-  "uname -a": "Error/Not Found: Command failed: uname -a\n'uname' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
-  "node -v": "v24.15.0"
-}
-```
