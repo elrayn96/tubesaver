@@ -302,6 +302,56 @@ export default function App() {
       });
   };
 
+  // 4.5 Fire Chapter segmented downloads conversion task
+  const handleDownloadChapters = (format: "mp4" | "mp3", mode: "single" | "merge", selectedChapters: any[], customFilename: string) => {
+    if (!videoData) return;
+
+    // Create a local temporary task immediately 
+    const tempTaskId = `chap_${videoData.videoId}_${Date.now()}`;
+    const tempTask: DownloadTask = {
+      id: tempTaskId,
+      title: customFilename || `${videoData.title}_segments`,
+      videoId: videoData.videoId,
+      thumbnail: videoData.thumbnail,
+      duration: "00:00",
+      format: format,
+      quality: format === "mp3" ? "320kbps" : "720p",
+      progress: 0,
+      speed: "0.0 MB/s",
+      eta: "Starting...",
+      status: "pending"
+    };
+
+    setTasks(prev => [tempTask, ...prev]);
+
+    fetch("/api/video/chapters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        videoId: videoData.videoId,
+        title: videoData.title,
+        format,
+        mode,
+        selectedChapters,
+        customFilename
+      })
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status === "success") {
+          setUrl("");
+          setVideoData(null);
+        } else {
+          setTasks(prev => prev.filter(t => t.id !== tempTaskId));
+          setError(data.message || "Failed to initiate chapter generation.");
+        }
+      })
+      .catch(err => {
+        setTasks(prev => prev.filter(t => t.id !== tempTaskId));
+        setError("Chapter segmentation task offline.");
+      });
+  };
+
   // 5. Build multiple parallel playlists downloads coordinator
   const handleBatchDownload = (videoIds: string[], formatId: string) => {
     if (!playlistData) return;
@@ -507,6 +557,7 @@ export default function App() {
               <PreviewSetupCard
                 video={videoData}
                 onDownload={handleDownload}
+                onDownloadChapters={handleDownloadChapters}
                 isDownloading={tasks.some(t => t.videoId === videoData.videoId)}
               />
             )}

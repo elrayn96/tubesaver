@@ -18,6 +18,11 @@ export interface VideoMetadata {
   author: string;
   viewCount?: string;
   formats: Format[];
+  chapters?: Array<{
+    title: string;
+    start: number;
+    end: number;
+  }>;
 }
 
 export interface PlaylistVideo {
