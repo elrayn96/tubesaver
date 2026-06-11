@@ -6,6 +6,75 @@ import { createServer as createViteServer } from "vite";
 import fs from "fs";
 import { execSync } from "child_process";
 import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import os from "os";
+
+// ─── Platform-aware constants ────────────────────────────────────────────────
+const isWindows = process.platform === 'win32';
+const TMP_DIR = os.tmpdir();
+const YTDLP_EXE = isWindows ? 'yt-dlp.exe' : 'yt-dlp';
+const YTDLP_PATH = path.join(TMP_DIR, YTDLP_EXE);
+const YTDLP_DOWNLOAD_URL = isWindows
+  ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+  : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+
+// Check ffmpeg availability once at startup with Windows WinGet fallback
+let ffmpegCmd = 'ffmpeg';
+let ffmpegAvailable = false;
+
+function resolveFfmpeg() {
+  // 1. Try standard command in PATH
+  try {
+    execSync('ffmpeg -version', { stdio: 'pipe', timeout: 3000 });
+    ffmpegAvailable = true;
+    ffmpegCmd = 'ffmpeg';
+    console.log('[TubeSaver] ffmpeg detected in PATH ✓');
+    return;
+  } catch {}
+
+  // 2. Try to locate under Windows winget packages
+  if (process.platform === 'win32') {
+    try {
+      const home = process.env.USERPROFILE || '';
+      const packagesDir = path.join(home, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Packages');
+      if (fs.existsSync(packagesDir)) {
+        const dirs = fs.readdirSync(packagesDir);
+        for (const dir of dirs) {
+          if (dir.startsWith('Gyan.FFmpeg')) {
+            const recursiveFind = (currentDir: string): string | null => {
+              const files = fs.readdirSync(currentDir);
+              for (const f of files) {
+                const full = path.join(currentDir, f);
+                const stat = fs.statSync(full);
+                if (stat.isDirectory()) {
+                  const res = recursiveFind(full);
+                  if (res) return res;
+                } else if (f === 'ffmpeg.exe') {
+                  return full;
+                }
+              }
+              return null;
+            };
+            const resolved = recursiveFind(path.join(packagesDir, dir));
+            if (resolved) {
+              execSync(`"${resolved}" -version`, { stdio: 'pipe', timeout: 3000 });
+              ffmpegAvailable = true;
+              ffmpegCmd = `"${resolved}"`;
+              console.log(`[TubeSaver] ffmpeg resolved dynamically from WinGet packages ✓: ${ffmpegCmd}`);
+              return;
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.log('[TubeSaver] ffmpeg WinGet search failed:', e.message);
+    }
+  }
+
+  console.log('[TubeSaver] ffmpeg not found — chapter trimming will be unavailable');
+}
+
+resolveFfmpeg();
 
 // Environmental startup diagnostics run as early as possible
 try {
@@ -70,6 +139,7 @@ interface DownloadTask {
   duration: string;
   format: string;
   quality: string;
+  size?: string;
   progress: number;
   speed: string;
   eta: string;
@@ -313,6 +383,127 @@ function extractJsonFromHtml(html: string, varName: string): any {
   return null;
 }
 
+// ─── Chapter extraction helpers ──────────────────────────────────────────────
+
+function durationStringToSeconds(duration: string): number {
+  const parts = duration.split(':').map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return 225;
+}
+
+function secondsToHMSLabel(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// Recursive deep-search helper
+function findDeep(obj: any, key: string): any {
+  if (!obj || typeof obj !== 'object') return null;
+  if (Array.isArray(obj)) {
+    for (const item of obj) { const f = findDeep(item, key); if (f) return f; }
+    return null;
+  }
+  if (obj[key]) return obj[key];
+  for (const k of Object.keys(obj)) { const f = findDeep(obj[k], key); if (f) return f; }
+  return null;
+}
+
+// Extract chapters from YouTube's structured multiMarkersPlayerBarRenderer (ytInitialData)
+function extractChaptersFromInitialData(
+  html: string,
+  totalDurationSeconds: number
+): Array<{ title: string; start: number; end: number }> | null {
+  try {
+    const dataObj = extractJsonFromHtml(html, 'ytInitialData');
+    if (!dataObj) return null;
+
+    const markersBar = findDeep(dataObj, 'multiMarkersPlayerBarRenderer');
+    if (!markersBar?.markersMap) return null;
+
+    const chapters: Array<{ title: string; start: number; end: number }> = [];
+
+    for (const marker of markersBar.markersMap) {
+      const chapterList = marker?.value?.chapters;
+      if (!chapterList?.length) continue;
+
+      const raw = chapterList.map((c: any) => ({
+        title:
+          c.chapterRenderer?.title?.simpleText ||
+          c.chapterRenderer?.title?.runs?.[0]?.text ||
+          'Chapter',
+        startMs: c.chapterRenderer?.timeRangeStartMillis || 0
+      }));
+
+      for (let i = 0; i < raw.length; i++) {
+        const start = Math.round(raw[i].startMs / 1000);
+        const end =
+          i < raw.length - 1
+            ? Math.round(raw[i + 1].startMs / 1000)
+            : totalDurationSeconds;
+        chapters.push({ title: raw[i].title, start, end });
+      }
+      break;
+    }
+
+    return chapters.length >= 2 ? chapters : null;
+  } catch {
+    return null;
+  }
+}
+
+// Extract chapters from description timestamps (e.g. "0:00 Introduction\n2:35 Setup")
+function extractChaptersFromDescription(
+  html: string,
+  totalDurationSeconds: number
+): Array<{ title: string; start: number; end: number }> | null {
+  try {
+    const descMatch = html.match(/"shortDescription"\s*:\s*"((?:[^"\\]|\\.)*?)"/s);
+    if (!descMatch) return null;
+
+    const desc = descMatch[1]
+      .replace(/\\n/g, '\n')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+
+    const tsRe = /(?:^|\n)(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[ \t]+(.+)/gm;
+    const raw: Array<{ start: number; title: string }> = [];
+    let m;
+    while ((m = tsRe.exec(desc)) !== null) {
+      const h = m[1] ? parseInt(m[1]) : 0;
+      const min = parseInt(m[2]);
+      const sec = parseInt(m[3]);
+      const title = m[4].trim().substring(0, 80);
+      if (title) raw.push({ start: h * 3600 + min * 60 + sec, title });
+    }
+
+    if (raw.length < 2) return null;
+    raw.sort((a, b) => a.start - b.start);
+
+    return raw.map((ch, i) => ({
+      title: ch.title,
+      start: ch.start,
+      end: i < raw.length - 1 ? raw[i + 1].start : totalDurationSeconds
+    }));
+  } catch {
+    return null;
+  }
+}
+
+// Main extractor — tries structured data first, then description timestamps
+function extractVideoChapters(
+  html: string,
+  totalDurationSeconds: number
+): Array<{ title: string; start: number; end: number }> | null {
+  return (
+    extractChaptersFromInitialData(html, totalDurationSeconds) ||
+    extractChaptersFromDescription(html, totalDurationSeconds)
+  );
+}
+
 // Helper function to extract YouTube direct stream details
 async function getYouTubeStreams(videoId: string) {
   try {
@@ -378,12 +569,14 @@ async function getYouTubeStreams(videoId: string) {
 
     const playerObj = extractJsonFromHtml(html, "ytInitialPlayerResponse");
     if (!playerObj) {
+      const earlyTotalSecs = durationStringToSeconds(duration);
       return {
         title,
         duration,
         viewCount,
         author,
-        streams: []
+        streams: [],
+        chapters: extractVideoChapters(html, earlyTotalSecs)
       };
     }
     
@@ -434,21 +627,27 @@ async function getYouTubeStreams(videoId: string) {
       const views = parseInt(videoDetails.viewCount || "1420582", 10);
       const viewCountStr = `${views.toLocaleString()} views`;
 
+      const totalDurSecs = durationStringToSeconds(finalDuration);
+      const chapters = extractVideoChapters(html, totalDurSecs);
+
       return {
         title: videoDetails.title || title,
         duration: finalDuration,
         viewCount: viewCountStr,
         author: videoDetails.author || author,
-        streams
+        streams,
+        chapters
       };
     } catch (innerErr) {
       console.warn("[TubeSaver JSON Parse Fallback]:", innerErr);
+      const fallbackSecs = durationStringToSeconds(duration);
       return {
         title,
         duration,
         viewCount,
         author,
-        streams: []
+        streams: [],
+        chapters: extractVideoChapters(html, fallbackSecs)
       };
     }
   } catch (err) {
@@ -574,23 +773,8 @@ app.post("/api/analyze-url", async (req, res) => {
         });
       }
       
-      // Try to get chapters from yt-dlp
-      let chapters = null;
-      try {
-        await ensureYtdlp();
-        const cmd = `python3 /tmp/yt-dlp -j "https://www.youtube.com/watch?v=${videoId}"`;
-        const stdout = execSync(cmd, { maxBuffer: 10 * 1024 * 1024, encoding: "utf8" });
-        const info = JSON.parse(stdout);
-        if (info.chapters && Array.isArray(info.chapters)) {
-          chapters = info.chapters.map((ch: any) => ({
-            title: ch.title || "Untitled Chapter",
-            start: Math.round(ch.start_time || 0),
-            end: Math.round(ch.end_time || 0)
-          }));
-        }
-      } catch (cErr) {
-        console.warn("[TubeSaver] Could not extract chapters with yt-dlp inline, falling back:", cErr);
-      }
+      // Chapters are extracted directly from YouTube HTML (no yt-dlp needed)
+      const chapters = ytData?.chapters || null;
 
       return res.json({
         status: "success",
@@ -613,56 +797,92 @@ app.post("/api/analyze-url", async (req, res) => {
   }
 });
 
-// Helper: Ensure standalone yt_dlp python executable is cached locally
-async function ensureYtdlp() {
-  if (!fs.existsSync("/tmp/yt-dlp")) {
-    console.log("[TubeSaver] Standalone yt-dlp python executor not found on disk. Initializing download...");
-    try {
-      execSync("curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /tmp/yt-dlp && chmod +x /tmp/yt-dlp", { stdio: "ignore" });
-      console.log("[TubeSaver] Standalone yt-dlp downloaded and marked +x successfully.");
-    } catch (e: any) {
-      console.error("[TubeSaver] Failed to acquire yt-dlp standalone executor:", e.message || e);
+// Helper: download a URL to a local file path using native Node fetch and stream pipeline
+async function downloadFileNode(url: string, destPath: string): Promise<void> {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9"
     }
+  });
+  if (!response.ok) {
+    throw new Error(`Server returned status ${response.status}: ${response.statusText}`);
+  }
+  if (!response.body) {
+    throw new Error("Response body is empty");
+  }
+  const fileStream = fs.createWriteStream(destPath);
+  await pipeline(Readable.fromWeb(response.body as any), fileStream);
+}
+
+// Helper: Ensure yt-dlp executable available (Windows-native exe supported)
+async function ensureYtdlp(): Promise<boolean> {
+  if (fs.existsSync(YTDLP_PATH) && fs.statSync(YTDLP_PATH).size > 0) return true;
+  console.log(`[TubeSaver] Downloading yt-dlp from ${YTDLP_DOWNLOAD_URL}...`);
+  try {
+    // If a zero-byte file is lingering, clean it up first
+    if (fs.existsSync(YTDLP_PATH)) fs.unlinkSync(YTDLP_PATH);
+    await downloadFileNode(YTDLP_DOWNLOAD_URL, YTDLP_PATH);
+    if (!isWindows) execSync(`chmod +x "${YTDLP_PATH}"`, { stdio: 'ignore' });
+    const ok = fs.existsSync(YTDLP_PATH) && fs.statSync(YTDLP_PATH).size > 0;
+    if (ok) console.log('[TubeSaver] yt-dlp acquired successfully.');
+    return ok;
+  } catch (e: any) {
+    console.error('[TubeSaver] Failed to acquire yt-dlp:', e.message || e);
+    // Cleanup failed file if any
+    try { if (fs.existsSync(YTDLP_PATH)) fs.unlinkSync(YTDLP_PATH); } catch {}
+    return false;
   }
 }
 
-// Helper: Cache standard source mp4 file synchronously
+function runYtdlp(args: string): string {
+  return execSync(`"${YTDLP_PATH}" ${args}`, { maxBuffer: 20 * 1024 * 1024, encoding: 'utf8' });
+}
+
+// Helper: Cache source mp4 locally (Windows-compatible, uses TMP_DIR)
 async function fetchAndCacheSourceVideo(videoId: string): Promise<string> {
-  const cachePath = `/tmp/source_${videoId}.mp4`;
-  if (fs.existsSync(cachePath)) {
+  const cachePath = path.join(TMP_DIR, `source_${videoId}.mp4`);
+  if (fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) {
+    console.log(`[TubeSaver Cache] Re-using cached source for ${videoId}`);
     return cachePath;
   }
-  
-  await ensureYtdlp();
-  
-  try {
-    console.log(`[TubeSaver Cache] Fetching and caching full source of video ${videoId} via yt-dlp`);
-    execSync(`python3 /tmp/yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]" "https://www.youtube.com/watch?v=${videoId}" -o "${cachePath}"`, { stdio: "ignore" });
-    if (fs.existsSync(cachePath)) {
-      return cachePath;
+
+  // Cleanup lingering zero-byte cache file
+  try { if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath); } catch {}
+
+  const ytdlpOk = await ensureYtdlp();
+  if (ytdlpOk) {
+    try {
+      console.log(`[TubeSaver Cache] Downloading ${videoId} via yt-dlp...`);
+      // Use player-client args to spoof mobile clients and bypass deprecation warnings & 403 Forbidden errors
+      runYtdlp(`-f "best[ext=mp4]/best" --extractor-args "youtube:player-client=ios,android" "https://www.youtube.com/watch?v=${videoId}" -o "${cachePath}"`);
+      if (fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) return cachePath;
+    } catch (err) {
+      console.warn('[TubeSaver Cache] yt-dlp download failed, trying direct stream fallback:', err);
+      try { if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath); } catch {}
     }
-  } catch (err) {
-    console.warn(`[TubeSaver Cache] yt-dlp cache failed, falling back to direct stream parsing`, err);
   }
-  
-  // Direct stream url fallback
+
+  // Fallback: pipe a direct stream URL to disk via native Node fetch streaming (no curl dependency, User-Agent spoofed)
   const streams = await getYouTubeStreams(videoId);
-  let streamUrl = "";
-  if (streams && streams.streams && streams.streams.length > 0) {
-    const selectedStream = streams.streams.find(s => s.itag === 22) || 
-                           streams.streams.find(s => s.itag === 18) || 
-                           streams.streams[0];
-    streamUrl = selectedStream.url;
-  } else {
-    streamUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+  if (streams?.streams?.length > 0) {
+    const sel = streams.streams.find((s: any) => s.itag === 22)
+             || streams.streams.find((s: any) => s.itag === 18)
+             || streams.streams[0];
+    console.log('[TubeSaver Cache] Streaming source to disk via Node fetch fallback...');
+    try {
+      await downloadFileNode(sel.url, cachePath);
+      if (fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) return cachePath;
+    } catch (fallbackErr) {
+      console.error('[TubeSaver Cache] Direct stream fallback failed:', fallbackErr);
+      try { if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath); } catch {}
+    }
   }
-  
-  console.log(`[TubeSaver Cache] Streaming fallback payload into cache path via curl`);
-  execSync(`curl -L "${streamUrl}" -o "${cachePath}"`, { stdio: "ignore" });
-  return cachePath;
+
+  throw new Error(`Unable to obtain video source for ${videoId}`);
 }
 
-// Background Task Executor for Chapter Trimming and Merging
+// Background Task: Chapter Trimming and Merging (Windows-compatible, uses TMP_DIR)
 async function processChaptersDownload(
   taskId: string,
   videoId: string,
@@ -673,170 +893,159 @@ async function processChaptersDownload(
 ) {
   const task = activeTasks.get(taskId);
   if (!task) return;
-  
+
   try {
     task.status = "downloading";
     task.progress = 15;
-    task.speed = "Downloading...";
-    task.eta = "Caching video to disk...";
+    task.speed = "A transferir...";
+    task.eta = "A guardar vídeo em cache...";
     broadcastTaskUpdate(task);
-    
-    // Download video ONLY ONCE
+
     const sourceFilePath = await fetchAndCacheSourceVideo(videoId);
-    
+
     task.status = "converting";
     task.progress = 60;
-    task.speed = "Applying FFmpeg...";
-    task.eta = "Extracting chapters...";
+    task.speed = "FFmpeg...";
+    task.eta = "A processar capítulos...";
     broadcastTaskUpdate(task);
-    
-    const finalOutputFile = `/tmp/${taskId}.${format}`;
-    
+
+    const finalOutputFile = path.join(TMP_DIR, `${taskId}.${format}`);
+
     if (mode === "single" || selectedChapters.length === 1) {
       const ch = selectedChapters[0];
       const startSec = ch.start;
       const durationSec = Math.max(1, ch.end - ch.start);
-      
-      console.log(`[TubeSaver FFmpeg] Slicing single chapter: ss ${startSec} to ${ch.end}`);
+      console.log(`[TubeSaver FFmpeg] Single chapter: ss=${startSec} t=${durationSec}`);
       if (format === "mp3") {
-        execSync(`ffmpeg -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${finalOutputFile}"`, { stdio: "ignore" });
+        execSync(`${ffmpegCmd} -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${finalOutputFile}"`, { stdio: "ignore" });
       } else {
-        execSync(`ffmpeg -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -c copy "${finalOutputFile}"`, { stdio: "ignore" });
+        execSync(`${ffmpegCmd} -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -c copy "${finalOutputFile}"`, { stdio: "ignore" });
       }
     } else if (mode === "merge") {
       const segmentFiles: string[] = [];
-      const listFilePath = `/tmp/list_${taskId}.txt`;
-      
-      console.log(`[TubeSaver FFmpeg] Extracting ${selectedChapters.length} list segments for merge`);
+      const listFilePath = path.join(TMP_DIR, `list_${taskId}.txt`);
+      console.log(`[TubeSaver FFmpeg] Merging ${selectedChapters.length} chapters`);
+
       for (let i = 0; i < selectedChapters.length; i++) {
         const ch = selectedChapters[i];
         const startSec = ch.start;
         const durationSec = Math.max(1, ch.end - ch.start);
-        const segmentFile = `/tmp/seg_${i}_${taskId}.${format}`;
-        
+        const segmentFile = path.join(TMP_DIR, `seg_${i}_${taskId}.${format}`);
         if (format === "mp3") {
-          execSync(`ffmpeg -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${segmentFile}"`, { stdio: "ignore" });
+          execSync(`${ffmpegCmd} -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${segmentFile}"`, { stdio: "ignore" });
         } else {
-          execSync(`ffmpeg -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -c copy "${segmentFile}"`, { stdio: "ignore" });
+          execSync(`${ffmpegCmd} -y -ss ${startSec} -t ${durationSec} -i "${sourceFilePath}" -c copy "${segmentFile}"`, { stdio: "ignore" });
         }
         segmentFiles.push(segmentFile);
       }
-      
-      let listContent = "";
-      for (const seg of segmentFiles) {
-        listContent += `file '${seg}'\n`;
-      }
+
+      // ffmpeg concat list uses forward slashes even on Windows
+      const listContent = segmentFiles.map(s => `file '${s.replace(/\\/g, '/')}'`).join('\n');
       fs.writeFileSync(listFilePath, listContent, "utf8");
-      
-      console.log(`[TubeSaver FFmpeg] Merging segment list to final file: ${finalOutputFile}`);
-      execSync(`ffmpeg -y -f concat -safe 0 -i "${listFilePath}" -c copy "${finalOutputFile}"`, { stdio: "ignore" });
-      
-      // Cleanup temporary files
-      for (const seg of segmentFiles) {
-        try { fs.unlinkSync(seg); } catch (e) {}
-      }
-      try { fs.unlinkSync(listFilePath); } catch (e) {}
+      execSync(`${ffmpegCmd} -y -f concat -safe 0 -i "${listFilePath}" -c copy "${finalOutputFile}"`, { stdio: "ignore" });
+
+      for (const seg of segmentFiles) { try { fs.unlinkSync(seg); } catch {} }
+      try { fs.unlinkSync(listFilePath); } catch {}
     } else {
-      // Full Video or full Audio conversion
+      // Full video conversion
       if (format === "mp3") {
-        execSync(`ffmpeg -y -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${finalOutputFile}"`, { stdio: "ignore" });
+        execSync(`${ffmpegCmd} -y -i "${sourceFilePath}" -vn -ar 44100 -ac 2 -b:a 320k "${finalOutputFile}"`, { stdio: "ignore" });
       } else {
-        execSync(`cp "${sourceFilePath}" "${finalOutputFile}"`);
+        fs.copyFileSync(sourceFilePath, finalOutputFile);
       }
     }
-    
-    // Finalize progress
+
     task.status = "completed";
     task.progress = 100;
-    task.speed = "Completed";
-    task.eta = "Completed successfully";
+    task.speed = "Concluído";
+    task.eta = "Pronto para guardar";
     broadcastTaskUpdate(task);
-    
-    // Auto clear task memory after 15s
-    setTimeout(() => {
-      activeTasks.delete(taskId);
-    }, 15000);
-    
+    setTimeout(() => activeTasks.delete(taskId), 15000);
+
   } catch (err: any) {
-    console.error("[TubeSaver FFMpeg Background Chapter Failure]:", err);
+    console.error("[TubeSaver FFmpeg Chapter Error]:", err);
     task.status = "failed";
     task.progress = 0;
-    task.speed = "Failed";
-    task.eta = err.message || "Extraction or merge error";
+    task.speed = "Falhou";
+    task.eta = err.message || "Erro no processamento de capítulos";
     broadcastTaskUpdate(task);
   }
 }
 
-// API: GET /video/metadata & GET /api/video/metadata
+// API: GET /video/metadata — scrapes YouTube HTML, no yt-dlp needed
 app.get(["/video/metadata", "/api/video/metadata"], async (req, res) => {
   let url = req.query.url as string;
   const videoIdParam = req.query.videoId as string;
-  
+
   if (!url && videoIdParam) {
     url = `https://www.youtube.com/watch?v=${videoIdParam}`;
   }
-  
   if (!url) {
     return res.status(400).json({ status: "error", message: "Please specify a URL or videoId" });
   }
-  
+
   const videoId = extractVideoId(url);
   try {
-    await ensureYtdlp();
-    const cmd = `python3 /tmp/yt-dlp -j "https://www.youtube.com/watch?v=${videoId}"`;
-    const stdout = execSync(cmd, { maxBuffer: 10 * 1024 * 1024, encoding: "utf8" });
-    const info = JSON.parse(stdout);
-    
-    const chapters = (info.chapters || []).map((ch: any) => ({
-      title: ch.title || "Untitled Chapter",
-      start: Math.round(ch.start_time || 0),
-      end: Math.round(ch.end_time || 0)
-    }));
-    
+    const ytData = await getYouTubeStreams(videoId);
+    if (!ytData) throw new Error("Could not fetch video data");
+    const durationSecs = durationStringToSeconds(ytData.duration);
     return res.json({
-      title: info.title || "YouTube Video",
-      duration: Math.round(info.duration || 210),
-      chapters: chapters
+      title: ytData.title,
+      duration: durationSecs,
+      chapters: ytData.chapters || []
     });
   } catch (err: any) {
-    console.warn("[TubeSaver] Fallback for video metadata mapping triggered.", err);
+    console.warn("[TubeSaver] Video metadata fallback triggered:", err.message);
     return res.json({
       title: "Sample Video",
       duration: 2520,
-      chapters: [
-        { title: "Introduction", start: 0, end: 155 },
-        { title: "Installation", start: 155, end: 920 },
-        { title: "Configuration", start: 920, end: 1690 },
-        { title: "Deployment", start: 1690, end: 2520 }
-      ]
+      chapters: []
     });
   }
 });
 
-// API: POST /video/chapters & POST /api/video/chapters
+// API: GET /api/capabilities — reports available server-side tools
+app.get("/api/capabilities", (_req, res) => {
+  res.json({
+    ffmpeg: ffmpegAvailable,
+    ytdlp: fs.existsSync(YTDLP_PATH)
+  });
+});
+
+// API: POST /video/chapters — accepts client taskId and checks ffmpeg availability
 app.post(["/video/chapters", "/api/video/chapters"], async (req, res) => {
-  const { videoId, title, format, mode, selectedChapters, customFilename } = req.body;
-  
+  const { videoId, title, format, mode, selectedChapters, customFilename, taskId: clientTaskId } = req.body;
+
   if (!videoId) {
     return res.status(400).json({ status: "error", message: "Missing required video ID parameter" });
   }
-  
+
+  if (!ffmpegAvailable) {
+    return res.status(503).json({
+      status: "error",
+      message: "ffmpeg não está instalado neste servidor. Instale ffmpeg e reinicie o servidor para activar o download por capítulos."
+    });
+  }
+
   const selectedFormatCode = format === "mp3" ? "mp3" : "mp4";
-  const taskId = `chap_${videoId}_${Date.now()}`;
+  const taskId = clientTaskId || `chap_${videoId}_${Date.now()}`;
   const finalTitle = customFilename || title || "Chapters Video File";
-  
-  // Estimate selected duration
+
   let selectedDurationSecs = 0;
   if (selectedChapters && Array.isArray(selectedChapters)) {
     selectedChapters.forEach((ch: any) => {
       selectedDurationSecs += Math.max(0, ch.end - ch.start);
     });
   }
-  
+
   const min = Math.floor(selectedDurationSecs / 60);
   const sec = selectedDurationSecs % 60;
   const durationStr = `${min}:${sec.toString().padStart(2, "0")}`;
-  
+
+  const minutes = selectedDurationSecs / 60;
+  const mbEstimate = selectedFormatCode === "mp3" ? minutes * 1.2 : minutes * 1.8;
+  const sizeStr = mbEstimate < 1 ? `${Math.round(mbEstimate * 1024)} KB` : `${mbEstimate.toFixed(1)} MB`;
+
   const newTask: DownloadTask = {
     id: taskId,
     title: finalTitle,
@@ -845,22 +1054,22 @@ app.post(["/video/chapters", "/api/video/chapters"], async (req, res) => {
     duration: durationStr || "05:00",
     format: selectedFormatCode,
     quality: format === "mp3" ? "320kbps" : "720p",
+    size: sizeStr,
     progress: 0,
-    speed: "Connecting...",
-    eta: "Checking cache...",
+    speed: "A conectar...",
+    eta: "A verificar cache...",
     status: "pending"
   };
-  
+
   activeTasks.set(taskId, newTask);
   broadcastTaskUpdate(newTask);
-  
-  // Kick off background thread segmenting/merging
+
   processChaptersDownload(taskId, videoId, finalTitle, format || "mp4", mode || "single", selectedChapters || []);
-  
+
   return res.json({
     status: "success",
     message: "Chapter operations scheduled successfully.",
-    taskId: taskId
+    taskId
   });
 });
 
@@ -877,7 +1086,8 @@ app.post("/api/download", (req, res) => {
     return res.status(400).json({ status: "error", message: "Missing required download parameters." });
   }
 
-  const selectedFormat = DEFAULT_FORMATS.find(f => f.id === formatId) || DEFAULT_FORMATS[0];
+  const dynamicFormats = getDynamicFormats(duration || "03:45");
+  const selectedFormat = dynamicFormats.find(f => f.id === formatId) || dynamicFormats[0];
   const taskId = clientTaskId || `${videoId}_${Date.now()}`;
   
   const newTask: DownloadTask = {
@@ -888,6 +1098,7 @@ app.post("/api/download", (req, res) => {
     duration: duration || "12:45",
     format: selectedFormat.container,
     quality: selectedFormat.resolution,
+    size: selectedFormat.size,
     progress: 0,
     speed: "0.0 MB/s",
     eta: "--:-- remaining",
@@ -954,9 +1165,9 @@ app.get("/api/download-file", async (req, res) => {
   
   if (taskId && typeof taskId === 'string') {
     const extCode = format === 'mp3' ? 'mp3' : 'mp4';
-    const primaryPath = `/tmp/${taskId}.${extCode}`;
-    const secondaryPath = `/tmp/${taskId}.mp4`;
-    const tertiaryPath = `/tmp/${taskId}.mp3`;
+    const primaryPath = path.join(TMP_DIR, `${taskId}.${extCode}`);
+    const secondaryPath = path.join(TMP_DIR, `${taskId}.mp4`);
+    const tertiaryPath = path.join(TMP_DIR, `${taskId}.mp3`);
     let fileToStream = "";
     
     if (fs.existsSync(primaryPath)) {
@@ -994,9 +1205,9 @@ app.get("/api/download-file", async (req, res) => {
     if (!ytData || !ytData.streams || ytData.streams.length === 0) {
       // Fallback to high-quality public content delivery networks when direct YouTube extraction is blocked/sandboxed
       if (isAudioOnly) {
-        streamUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        streamUrl = "https://www.w3schools.com/html/horse.mp3";
       } else {
-        streamUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+        streamUrl = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
       }
     } else {
       // Find a suitable stream format
@@ -1042,9 +1253,9 @@ app.get("/api/download-file", async (req, res) => {
     if (!streamRes.ok) {
       console.warn(`[TubeSaver CDN Proxy] Failed to fetch direct stream (${streamRes.statusText}). Falling back to public sample.`);
       if (isAudioOnly) {
-        streamUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        streamUrl = "https://www.w3schools.com/html/horse.mp3";
       } else {
-        streamUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+        streamUrl = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
       }
       streamRes = await fetch(streamUrl);
       if (!streamRes.ok) {
