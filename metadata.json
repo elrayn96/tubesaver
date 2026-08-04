@@ -1,6 +1,6 @@
 {
   "name": "TubeSaver",
   "description": "A clean, high-performance, and beautiful YouTube video and playlist downloader.",
-  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

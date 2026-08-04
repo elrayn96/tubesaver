@@ -16,8 +16,6 @@ export default function DownloadProgressList({ tasks, onCancel, onTriggerDownloa
     setDownloadingId(task.id);
     try {
       await onTriggerDownload(task);
-      // Keep disabled state for 2 seconds to show feedback and prevent multiple clicks
-      await new Promise((resolve) => setTimeout(resolve, 2000));
     } catch (err) {
       console.error("Local file fetch download failure:", err);
     } finally {

@@ -88,7 +88,7 @@ export default function App() {
                 const idExists = currentHistory.some(item => item.id === updatedTask.id);
                 if (idExists) return currentHistory;
 
-                const sizeOfFormat = updatedTask.size || formats.find(f => f.resolution === updatedTask.quality)?.size || "15.4 MB";
+                const sizeOfFormat = formats.find(f => f.resolution === updatedTask.quality)?.size || "15.4 MB";
                 const freshItem: HistoryItem = {
                   id: updatedTask.id,
                   title: updatedTask.title,
@@ -176,7 +176,7 @@ export default function App() {
                 const idExists = currentHistory.some(item => item.id === remoteTask.id);
                 if (idExists) return currentHistory;
 
-                const sizeOfFormat = remoteTask.size || formats.find(f => f.resolution === remoteTask.quality)?.size || "15.4 MB";
+                const sizeOfFormat = formats.find(f => f.resolution === remoteTask.quality)?.size || "15.4 MB";
                 const freshItem: HistoryItem = {
                   id: remoteTask.id,
                   title: remoteTask.title,
@@ -250,7 +250,7 @@ export default function App() {
 
     // Create a local temporary task immediately so the active transfer list is shown with 0% right away
     const tempTaskId = `${videoData.videoId}_${Date.now()}`;
-    const selectedFormat = videoData.formats.find(f => f.id === formatId) || videoData.formats[0];
+    const selectedFormat = formats.find(f => f.id === formatId) || formats[0] || { container: "mp4", resolution: "720p" };
     const tempTask: DownloadTask = {
       id: tempTaskId,
       title: filename || videoData.title,
@@ -259,7 +259,6 @@ export default function App() {
       duration: videoData.duration,
       format: selectedFormat.container,
       quality: selectedFormat.resolution,
-      size: selectedFormat.size,
       progress: 0,
       speed: "0.0 MB/s",
       eta: "Starting...",
@@ -307,19 +306,6 @@ export default function App() {
   const handleDownloadChapters = (format: "mp4" | "mp3", mode: "single" | "merge", selectedChapters: any[], customFilename: string) => {
     if (!videoData) return;
 
-    // Calculate total duration and size for dynamic temp task
-    let totalSeconds = 0;
-    selectedChapters.forEach((ch: any) => {
-      totalSeconds += Math.max(0, ch.end - ch.start);
-    });
-    const minutes = totalSeconds / 60;
-    const mbEstimate = format === "mp3" ? minutes * 1.2 : minutes * 1.8;
-    const sizeStr = mbEstimate < 1 ? `${Math.round(mbEstimate * 1024)} KB` : `${mbEstimate.toFixed(1)} MB`;
-
-    const min = Math.floor(totalSeconds / 60);
-    const sec = totalSeconds % 60;
-    const durationStr = `${min}:${sec.toString().padStart(2, "0")}`;
-
     // Create a local temporary task immediately 
     const tempTaskId = `chap_${videoData.videoId}_${Date.now()}`;
     const tempTask: DownloadTask = {
@@ -327,10 +313,9 @@ export default function App() {
       title: customFilename || `${videoData.title}_segments`,
       videoId: videoData.videoId,
       thumbnail: videoData.thumbnail,
-      duration: durationStr,
+      duration: "00:00",
       format: format,
       quality: format === "mp3" ? "320kbps" : "720p",
-      size: sizeStr,
       progress: 0,
       speed: "0.0 MB/s",
       eta: "Starting...",
@@ -424,7 +409,7 @@ export default function App() {
 
   // 5.5 Automatically download prepared file to device
   const triggerDeviceDownload = (task: DownloadTask) => {
-    const downloadUrl = `/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}&taskId=${task.id}`;
+    const downloadUrl = `/api/download-file?videoId=${task.videoId}&format=${task.format}&title=${encodeURIComponent(task.title)}`;
     const a = document.createElement("a");
     a.href = downloadUrl;
     a.download = `${task.title.replace(/[^a-zA-Z0-9]/g, "_")}.${task.format === "mp3" || task.format === "audio" ? "mp3" : "mp4"}`;

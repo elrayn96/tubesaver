@@ -49,7 +49,6 @@ export interface DownloadTask {
   duration: string;
   format: string;
   quality: string;
-  size?: string;
   progress: number;
   speed: string;
   eta: string;
